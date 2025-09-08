@@ -3,14 +3,68 @@ import sqlite3
 from datetime import datetime
 import os
 import shutil
+import xlwings as xw
+
+def copy_data_worksheet_to_source(clean_output_file, source_file_path):
+    """
+    Copy the DATA worksheet from the clean output file to the source file using xlwings.
+    This preserves all macros and file integrity.
+    """
+    try:
+        print(f"Copying DATA worksheet from clean output to source file...")
+        print(f"  - Source: {source_file_path}")
+        print(f"  - Clean output: {clean_output_file}")
+        
+        # Open both files with xlwings (Excel doesn't need to be visible)
+        app = xw.App(visible=False, add_book=False)
+        
+        try:
+            # Open the clean output file (read-only)
+            output_wb = app.books.open(clean_output_file, read_only=True)
+            output_ws = output_wb.sheets['DATA']
+            
+            # Open the source file
+            source_wb = app.books.open(source_file_path)
+            
+            # Remove existing DATA worksheet if it exists
+            if 'DATA' in [sheet.name for sheet in source_wb.sheets]:
+                source_wb.sheets['DATA'].delete()
+                print("  - Removed existing DATA worksheet from source")
+            
+            # Copy the DATA worksheet from output to source
+            output_ws.api.Copy(Before=source_wb.sheets[0].api)
+            print("  - Copied DATA worksheet to source file")
+            
+            # Save the source file
+            source_wb.save()
+            print("  - Saved source file with DATA worksheet")
+            
+            # Close workbooks
+            output_wb.close()
+            source_wb.close()
+            
+            print("  - Successfully copied DATA worksheet while preserving all macros and worksheets")
+            return True
+            
+        finally:
+            # Always quit the Excel application
+            app.quit()
+            
+    except Exception as e:
+        print(f"  - Error copying DATA worksheet: {str(e)}")
+        try:
+            app.quit()
+        except:
+            pass
+        return False
 
 def process_resource_data():
     """
     Read the Excel file and create a SQLite database with worksheets starting with 'tbl'
     """
     # Excel file name
-    excel_file = r"C:\Users\thockswender\OneDrive - InvestCloud\Tom\scratch\resources 1.0.xlsm"
-    
+    excel_file = r"C:\Users\thockswender\OneDrive - InvestCloud\Tom\Resource Planning\resourcing.xlsm"
+
     # Check if the Excel file exists
     if not os.path.exists(excel_file):
         print(f"Error: {excel_file} not found in the current directory")
@@ -94,34 +148,36 @@ def process_resource_data():
         
         # Create joined output worksheet
         print("\nCreating joined output worksheet...")
-        create_joined_output(copied_excel_file, db_filename, timestamp, output_dir)
+        create_joined_output(copied_excel_file, db_filename, timestamp, output_dir, excel_file)
         
     except Exception as e:
         print(f"Error processing Excel file: {str(e)}")
 
 
 
-def create_joined_output(excel_file, db_filename, timestamp, output_dir):
+def create_joined_output(excel_file, db_filename, timestamp, output_dir, original_source_file):
     """
-    Create a joined output worksheet from the three main tables
+    Create a joined output worksheet from the main tables including tblRates
     """
     try:
         # Connect to the database
         conn = sqlite3.connect(db_filename)
         
-        # Create the joined query - left join from DW to UKG, PersonToTeam, Title Map, and TeamToBacklog
+        # Create the joined query - left join from DW to UKG, PersonToTeam, Title Map, TeamToBacklog, and Rates
         join_query = """
         SELECT 
             dw.Employee_Number,
             ukg.*,
             pt.*,
-            tm.*,
-            tb.*
+            tm.Role,
+            tb.*,
+            r.*
         FROM "tblDW" dw
         LEFT JOIN "tblUKG" ukg ON dw.Employee_Number = ukg.Employee_Number
         LEFT JOIN "tblPersonToTeam" pt ON dw.Employee_Number = pt.Employee_Number
         LEFT JOIN "tblTitleMap" tm ON ukg.Business_Title = tm.Business_Title
         LEFT JOIN "tblTeamToBacklog" tb ON pt.Team = tb.Team
+        LEFT JOIN "tblRates" r ON ukg.Location_Country = r.Location_Country
         ORDER BY dw.Employee_Number
         """
         
@@ -260,20 +316,23 @@ def create_joined_output(excel_file, db_filename, timestamp, output_dir):
             print("Proceeding with all columns in output")
         
         # Create a new Excel file with only the expanded data
-        output_excel_file = os.path.join(output_dir, f"resources_{timestamp}.xlsx")
+        output_excel_file = os.path.join(output_dir, f"resources_output_{timestamp}.xlsx")
         
         # Write only the expanded dataset to the Excel file
         try:
             # Use a more robust Excel writing approach
-            expanded_df.to_excel(output_excel_file, sheet_name='output_expanded', index=False, engine='openpyxl')
+            expanded_df.to_excel(output_excel_file, sheet_name='DATA', index=False, engine='openpyxl')
             print(f"Successfully created Excel file: {output_excel_file}")
         except Exception as excel_error:
             print(f"Error writing Excel file: {str(excel_error)}")
             # Fallback: try writing as CSV
-            csv_file = os.path.join(output_dir, f"resources_{timestamp}.csv")
+            csv_file = os.path.join(output_dir, f"resources_output_{timestamp}.csv")
             expanded_df.to_csv(csv_file, index=False)
             print(f"Saved as CSV instead: {csv_file}")
         print(f"Expanded data has {len(expanded_df)} rows (added {len(expanded_df) - len(joined_df)} rows)")
+        
+        # Copy the DATA worksheet from the clean output file to the source file
+        copy_data_worksheet_to_source(output_excel_file, original_source_file)
         
     except Exception as e:
         print(f"Error creating joined output: {str(e)}")
