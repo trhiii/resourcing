@@ -3,60 +3,6 @@ import sqlite3
 from datetime import datetime
 import os
 import shutil
-import xlwings as xw
-
-def copy_data_worksheet_to_source(clean_output_file, source_file_path):
-    """
-    Copy the DATA worksheet from the clean output file to the source file using xlwings.
-    This preserves all macros and file integrity.
-    """
-    try:
-        print(f"Copying DATA worksheet from clean output to source file...")
-        print(f"  - Source: {source_file_path}")
-        print(f"  - Clean output: {clean_output_file}")
-        
-        # Open both files with xlwings (Excel doesn't need to be visible)
-        app = xw.App(visible=False, add_book=False)
-        
-        try:
-            # Open the clean output file (read-only)
-            output_wb = app.books.open(clean_output_file, read_only=True)
-            output_ws = output_wb.sheets['DATA']
-            
-            # Open the source file
-            source_wb = app.books.open(source_file_path)
-            
-            # Remove existing DATA worksheet if it exists
-            if 'DATA' in [sheet.name for sheet in source_wb.sheets]:
-                source_wb.sheets['DATA'].delete()
-                print("  - Removed existing DATA worksheet from source")
-            
-            # Copy the DATA worksheet from output to source
-            output_ws.api.Copy(Before=source_wb.sheets[0].api)
-            print("  - Copied DATA worksheet to source file")
-            
-            # Save the source file
-            source_wb.save()
-            print("  - Saved source file with DATA worksheet")
-            
-            # Close workbooks
-            output_wb.close()
-            source_wb.close()
-            
-            print("  - Successfully copied DATA worksheet while preserving all macros and worksheets")
-            return True
-            
-        finally:
-            # Always quit the Excel application
-            app.quit()
-            
-    except Exception as e:
-        print(f"  - Error copying DATA worksheet: {str(e)}")
-        try:
-            app.quit()
-        except:
-            pass
-        return False
 
 def process_resource_data():
     """
@@ -163,32 +109,31 @@ def create_joined_output(excel_file, db_filename, timestamp, output_dir, origina
         # Connect to the database
         conn = sqlite3.connect(db_filename)
         
-        # Create the joined query - left join from DW to UKG, PersonToTeam, Title Map, TeamToBacklog, and Rates
+        # Create the joined query - left join from PersonToTeam to UKG, Title Map, TeamToBacklog, and Rates
         join_query = """
         SELECT 
-            dw.Employee_Number,
+            pt.Employee_Number,
             ukg.*,
             pt.*,
             tm.Role,
             tb.*,
             r.*
-        FROM "tblDW" dw
-        LEFT JOIN "tblUKG" ukg ON dw.Employee_Number = ukg.Employee_Number
-        LEFT JOIN "tblPersonToTeam" pt ON dw.Employee_Number = pt.Employee_Number
+        FROM "tblPersonToTeam" pt
+        LEFT JOIN "tblUKG" ukg ON pt.Employee_Number = ukg.Employee_Number
         LEFT JOIN "tblTitleMap" tm ON ukg.Business_Title = tm.Business_Title
         LEFT JOIN "tblTeamToBacklog" tb ON pt.Team = tb.Team
         LEFT JOIN "tblRates" r ON ukg.Location_Country = r.Location_Country
-        ORDER BY dw.Employee_Number
+        ORDER BY pt.Employee_Number
         """
         
-        # First, get the count of rows in tblDW and all employee numbers to verify we don't lose any
-        dw_count_query = 'SELECT COUNT(*) as count FROM "tblDW"'
-        dw_count = pd.read_sql_query(dw_count_query, conn)
-        dw_row_count = dw_count.iloc[0]['count']
-        print(f"tblDW has {dw_row_count} rows")
+        # First, get the count of rows in tblPersonToTeam and all employee numbers to verify we don't lose any
+        pt_count_query = 'SELECT COUNT(*) as count FROM "tblPersonToTeam"'
+        pt_count = pd.read_sql_query(pt_count_query, conn)
+        pt_row_count = pt_count.iloc[0]['count']
+        print(f"tblPersonToTeam has {pt_row_count} rows")
         
-        # Get all employee numbers from tblDW
-        dw_employee_numbers = pd.read_sql_query('SELECT DISTINCT Employee_Number FROM "tblDW"', conn)
+        # Get all employee numbers from tblPersonToTeam
+        pt_employee_numbers = pd.read_sql_query('SELECT DISTINCT Employee_Number FROM "tblPersonToTeam"', conn)
         
         # Execute the query and get the results
         joined_df = pd.read_sql_query(join_query, conn)
@@ -200,16 +145,16 @@ def create_joined_output(excel_file, db_filename, timestamp, output_dir, origina
         # Note: Field configuration will be applied at the end to filter final output
         print("Field configuration will be applied to final output")
         
-        # Verify that all tblDW Employee_Number values are present in the joined output
-        # Use the first Employee_Number column (from tblDW)
+        # Verify that all tblPersonToTeam Employee_Number values are present in the joined output
+        # Use the first Employee_Number column (from tblPersonToTeam)
         joined_employee_numbers = joined_df.iloc[:, 0].dropna().unique()
         
-        missing_employees = set(dw_employee_numbers['Employee_Number'].dropna().tolist()) - set(joined_employee_numbers)
+        missing_employees = set(pt_employee_numbers['Employee_Number'].dropna().tolist()) - set(joined_employee_numbers)
         if missing_employees:
-            print(f"ERROR: Missing {len(missing_employees)} employees from tblDW in joined output!")
+            print(f"ERROR: Missing {len(missing_employees)} employees from tblPersonToTeam in joined output!")
             print(f"Missing Employee Numbers: {sorted(missing_employees)}")
         else:
-            print("✓ All tblDW employees preserved in joined output")
+            print("✓ All tblPersonToTeam employees preserved in joined output")
         
         # Handle duplicate column names
         print("Checking for duplicate columns...")
@@ -331,8 +276,13 @@ def create_joined_output(excel_file, db_filename, timestamp, output_dir, origina
             print(f"Saved as CSV instead: {csv_file}")
         print(f"Expanded data has {len(expanded_df)} rows (added {len(expanded_df) - len(joined_df)} rows)")
         
-        # Copy the DATA worksheet from the clean output file to the source file
-        copy_data_worksheet_to_source(output_excel_file, original_source_file)
+        # Create OUTPUT file in the source directory
+        source_dir = os.path.dirname(original_source_file)
+        output_file_in_source_dir = os.path.join(source_dir, "OUTPUT.xlsx")
+        
+        # Copy the clean output file to the source directory as OUTPUT.xlsx
+        shutil.copy2(output_excel_file, output_file_in_source_dir)
+        print(f"Created OUTPUT file in source directory: {output_file_in_source_dir}")  
         
     except Exception as e:
         print(f"Error creating joined output: {str(e)}")
@@ -400,10 +350,30 @@ def expand_with_missing_dates(df):
                 earliest_exit_date = employee_exit_records['AsOfDate'].min()
                 print(f"Employee {employee_num} exits on {earliest_exit_date.date()}")
             
+            # Find the last date for this specific combination
+            last_date_for_combination = matching_records['AsOfDate'].max()
+            
+            # Check if there are any newer records for this employee (indicating they moved to new teams)
+            employee_records_after_combination = employee_all_records[employee_all_records['AsOfDate'] > last_date_for_combination]
+            
+            # Determine the cutoff date for this combination
+            cutoff_date = None
+            if not employee_records_after_combination.empty:
+                # Employee has newer records, so this combination should stop after its last date
+                cutoff_date = last_date_for_combination
+            elif earliest_exit_date:
+                # Employee exited, use exit date
+                cutoff_date = earliest_exit_date
+            # If no newer records and no exit, continue until the end of the date range
+            
             # For each month in the complete range
             for month_start in all_months:
                 # If this employee has exited before this month, skip (but allow the exit month itself)
                 if earliest_exit_date and month_start > earliest_exit_date.replace(day=1):
+                    continue
+                
+                # If this combination has a cutoff date, stop creating records after that month
+                if cutoff_date and month_start > cutoff_date.replace(day=1):
                     continue
                 
                 # Find the most recent record before or on the end of this month for this combination
