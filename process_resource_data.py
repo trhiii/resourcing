@@ -4,26 +4,22 @@ from datetime import datetime
 import os
 import shutil
 
-def process_resource_data():
+def create_database_from_excel(excel_file, output_dir, timestamp):
     """
     Read the Excel file and create a SQLite database with worksheets starting with 'tbl'
+    Returns the database filename and copied Excel file path
     """
-    # Excel file name
-    excel_file = r"C:\Users\thockswender\OneDrive - InvestCloud\Tom\Resource Planning\resourcing.xlsm"
-
     # Check if the Excel file exists
     if not os.path.exists(excel_file):
         print(f"Error: {excel_file} not found in the current directory")
-        return
+        return None, None
     
     # Create output directory if it doesn't exist
-    output_dir = "output"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
         print(f"Created output directory: {output_dir}")
     
     # Generate datetime stamp for the database filename
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     db_filename = os.path.join(output_dir, f"resources_{timestamp}.db")
     
     print(f"Processing Excel file: {excel_file}")
@@ -92,35 +88,33 @@ def process_resource_data():
         
         print(f"Tables created: {[table[0] for table in tables]}")
         
-        # Create joined output worksheet
-        print("\nCreating joined output worksheet...")
-        create_joined_output(copied_excel_file, db_filename, timestamp, output_dir, excel_file)
+        return db_filename, copied_excel_file
         
     except Exception as e:
         print(f"Error processing Excel file: {str(e)}")
+        return None, None
 
 
-
-def create_joined_output(excel_file, db_filename, timestamp, output_dir, original_source_file):
+def create_joined_dataframe(db_filename):
     """
-    Create a joined output worksheet from the main tables including tblRates
+    Create a joined DataFrame from the main tables
+    Returns the joined DataFrame
     """
     try:
         # Connect to the database
         conn = sqlite3.connect(db_filename)
         
-        # Create the joined query - left join from PersonToTeam to UKG, Title Map, TeamToBacklog, and Rates
+        # Create the joined query - left join from PersonToTeam to UKG, TeamToBacklog, and Rates
+        # Note: Role will be added programmatically after the join
         join_query = """
         SELECT 
             pt.Employee_Number,
             ukg.*,
             pt.*,
-            tm.Role,
             tb.*,
             r.*
         FROM "tblPersonToTeam" pt
         LEFT JOIN "tblUKG" ukg ON pt.Employee_Number = ukg.Employee_Number
-        LEFT JOIN "tblTitleMap" tm ON ukg.Business_Title = tm.Business_Title
         LEFT JOIN "tblTeamToBacklog" tb ON pt.Team = tb.Team
         LEFT JOIN "tblRates" r ON ukg.Location_Country = r.Location_Country
         ORDER BY pt.Employee_Number
@@ -137,13 +131,21 @@ def create_joined_output(excel_file, db_filename, timestamp, output_dir, origina
         
         # Execute the query and get the results
         joined_df = pd.read_sql_query(join_query, conn)
+        
+        # Add Role column programmatically using tblTitleMap lookup
+        print("Adding Role column programmatically...")
+        role_mapping_df = pd.read_sql_query('SELECT Business_Title, Role FROM "tblTitleMap"', conn)
+        role_mapping = dict(zip(role_mapping_df['Business_Title'], role_mapping_df['Role']))
+        
+        # Map Business_Title to Role, defaulting to "?" if not found
+        joined_df['Role'] = joined_df['Business_Title'].map(role_mapping).fillna('?')
+        
+        print(f"Role mapping applied: {len(role_mapping)} titles mapped, {joined_df['Role'].isna().sum()} records defaulted to '?'")
+        
         conn.close()
         
         print(f"Joined data created with {len(joined_df)} rows")
         print(f"Joined DataFrame columns: {joined_df.columns.tolist()}")
-        
-        # Note: Field configuration will be applied at the end to filter final output
-        print("Field configuration will be applied to final output")
         
         # Verify that all tblPersonToTeam Employee_Number values are present in the joined output
         # Use the first Employee_Number column (from tblPersonToTeam)
@@ -177,121 +179,193 @@ def create_joined_output(excel_file, db_filename, timestamp, output_dir, origina
             joined_df.columns = new_columns
             print(f"Renamed {len(new_columns) - len(columns)} duplicate columns")
         
-        # Save the joined data to a table called "output" in the database
-        conn = sqlite3.connect(db_filename)
-        joined_df.to_sql("output", conn, if_exists='replace', index=False)
-        print(f"Saved joined data to 'output' table in database")
-        
-        # Expand the DataFrame with missing calendar dates
-        print("\nExpanding DataFrame with missing calendar dates...")
-        expanded_df = expand_with_missing_dates(joined_df)
-        
-        # Add calculated columns to the expanded DataFrame
-        print("\nAdding calculated columns to expanded data...")
-        expanded_df = add_calculated_columns(expanded_df, db_filename)
-        
-        # Save the expanded data to a table called "output_expanded" in the database
-        expanded_df.to_sql("output_expanded", conn, if_exists='replace', index=False)
-        conn.close()
-        
-        print(f"Saved expanded data to 'output_expanded' table in database")
-        
-        # Apply field configuration to filter final output columns
-        try:
-            # Check if tblFieldConfig worksheet exists
-            field_config_df = pd.read_excel(excel_file, sheet_name='tblFieldConfig')
-            print("Applying field configuration to final output...")
-            
-            # Read the field configuration to get the order
-            field_config_df = pd.read_excel(excel_file, sheet_name='tblFieldConfig')
-            field_config_df.columns = [str(col).replace(' ', '_').replace('-', '_').replace('(', '').replace(')', '') for col in field_config_df.columns]
-            
-            # Find the table and field column names
-            table_col = None
-            field_col = None
-            for col in field_config_df.columns:
-                col_lower = col.lower()
-                if 'table' in col_lower or 'tablename' in col_lower:
-                    table_col = col
-                elif 'field' in col_lower or 'column' in col_lower or 'fieldname' in col_lower:
-                    field_col = col
-            
-            if table_col and field_col:
-                # Get columns to keep in config order
-                columns_to_keep = []
-                missing_fields = []
-                
-                for _, row in field_config_df.iterrows():
-                    field_name = row[field_col]
-                    if pd.isna(field_name):
-                        continue
-                    
-                    # Look for column match (handle spaces vs underscores)
-                    found = False
-                    for col in expanded_df.columns:
-                        # Normalize both names for comparison
-                        normalized_field = field_name.lower().replace(' ', '_').replace('-', '_')
-                        normalized_col = col.lower()
-                        if normalized_field == normalized_col:
-                            columns_to_keep.append(col)
-                            found = True
-                            break
-                    
-                    if not found:
-                        missing_fields.append(field_name)
-                
-                # Fail if any fields are missing
-                if missing_fields:
-                    error_msg = f"ERROR: Field configuration contains fields that don't exist:\n"
-                    error_msg += "\n".join([f"  - {field}" for field in missing_fields])
-                    error_msg += f"\n\nAvailable columns: {sorted(expanded_df.columns.tolist())}"
-                    raise ValueError(error_msg)
-                
-                # Filter to only the specified columns in the specified order, plus derived fields
-                if columns_to_keep:
-                    # Determine the maximum number of levels in the organization for dynamic mgr fields
-                    max_levels = get_max_org_levels(db_filename)
-                    mgr_fields = [f'mgr_{i}' for i in range(1, max_levels + 1)]
-                    derived_fields = ['Year', 'YearMonth', 'Employee_Name'] + mgr_fields + ['Level_From_Top']
-                    final_columns = columns_to_keep + [col for col in derived_fields if col in expanded_df.columns]
-                    expanded_df = expanded_df[final_columns]
-                    print(f"Filtered final output to {len(final_columns)} columns: {final_columns}")
-        except Exception as e:
-            print(f"No field configuration found or error reading it: {str(e)}")
-            print("Proceeding with all columns in output")
-        
-        # Create a new Excel file with only the expanded data
-        output_excel_file = os.path.join(output_dir, f"resources_output_{timestamp}.xlsx")
-        
-        # Write only the expanded dataset to the Excel file
-        try:
-            # Use a more robust Excel writing approach
-            expanded_df.to_excel(output_excel_file, sheet_name='DATA', index=False, engine='openpyxl')
-            print(f"Successfully created Excel file: {output_excel_file}")
-        except Exception as excel_error:
-            print(f"Error writing Excel file: {str(excel_error)}")
-            # Fallback: try writing as CSV
-            csv_file = os.path.join(output_dir, f"resources_output_{timestamp}.csv")
-            expanded_df.to_csv(csv_file, index=False)
-            print(f"Saved as CSV instead: {csv_file}")
-        print(f"Expanded data has {len(expanded_df)} rows (added {len(expanded_df) - len(joined_df)} rows)")
-        
-        # Create OUTPUT file in the source directory
-        source_dir = os.path.dirname(original_source_file)
-        output_file_in_source_dir = os.path.join(source_dir, "OUTPUT.xlsx")
-        
-        # Copy the clean output file to the source directory as OUTPUT.xlsx
-        shutil.copy2(output_excel_file, output_file_in_source_dir)
-        print(f"Created OUTPUT file in source directory: {output_file_in_source_dir}")  
+        return joined_df
         
     except Exception as e:
-        print(f"Error creating joined output: {str(e)}")
+        print(f"Error creating joined DataFrame: {str(e)}")
+        return None
+
+
+def expand_dataframe_with_dates(joined_df):
+    """
+    Expand the DataFrame with daily records using fill-down logic
+    Returns the expanded DataFrame
+    """
+    print("\nExpanding DataFrame with daily records...")
+    expanded_df = expand_with_missing_dates(joined_df)
+    return expanded_df
+
+
+def add_calculated_fields(expanded_df, db_filename):
+    """
+    Add calculated columns to the expanded DataFrame
+    Returns the DataFrame with calculated fields
+    """
+    print("\nAdding calculated columns to expanded data...")
+    final_df = add_calculated_columns(expanded_df, db_filename)
+    return final_df
+
+
+def apply_field_configuration(final_df, excel_file, db_filename):
+    """
+    Apply field configuration to filter final output columns
+    Returns the filtered DataFrame
+    """
+    try:
+        # Check if tblFieldConfig worksheet exists
+        field_config_df = pd.read_excel(excel_file, sheet_name='tblFieldConfig')
+        print("Applying field configuration to final output...")
+        
+        # Read the field configuration to get the order
+        field_config_df = pd.read_excel(excel_file, sheet_name='tblFieldConfig')
+        field_config_df.columns = [str(col).replace(' ', '_').replace('-', '_').replace('(', '').replace(')', '') for col in field_config_df.columns]
+        
+        # Find the table and field column names
+        table_col = None
+        field_col = None
+        for col in field_config_df.columns:
+            col_lower = col.lower()
+            if 'table' in col_lower or 'tablename' in col_lower:
+                table_col = col
+            elif 'field' in col_lower or 'column' in col_lower or 'fieldname' in col_lower:
+                field_col = col
+        
+        if table_col and field_col:
+            # Get columns to keep in config order
+            columns_to_keep = []
+            missing_fields = []
+            
+            for _, row in field_config_df.iterrows():
+                field_name = row[field_col]
+                if pd.isna(field_name):
+                    continue
+                
+                # Look for column match (handle spaces vs underscores)
+                found = False
+                for col in final_df.columns:
+                    # Normalize both names for comparison
+                    normalized_field = field_name.lower().replace(' ', '_').replace('-', '_')
+                    normalized_col = col.lower()
+                    if normalized_field == normalized_col:
+                        columns_to_keep.append(col)
+                        found = True
+                        break
+                
+                if not found:
+                    missing_fields.append(field_name)
+            
+            # Fail if any fields are missing
+            if missing_fields:
+                error_msg = f"ERROR: Field configuration contains fields that don't exist:\n"
+                error_msg += "\n".join([f"  - {field}" for field in missing_fields])
+                error_msg += f"\n\nAvailable columns: {sorted(final_df.columns.tolist())}"
+                raise ValueError(error_msg)
+            
+            # Filter to only the specified columns in the specified order, plus derived fields
+            if columns_to_keep:
+                # Determine the maximum number of levels in the organization for dynamic mgr fields
+                max_levels = get_max_org_levels(db_filename)
+                mgr_fields = [f'mgr_{i}' for i in range(1, max_levels + 1)]
+                derived_fields = ['Year', 'YearMonth', 'Employee_Name', 'Allocation'] + mgr_fields + ['Level_From_Top']
+                final_columns = columns_to_keep + [col for col in derived_fields if col in final_df.columns]
+                final_df = final_df[final_columns]
+                print(f"Filtered final output to {len(final_columns)} columns: {final_columns}")
+        return final_df
+    except Exception as e:
+        print(f"No field configuration found or error reading it: {str(e)}")
+        print("Proceeding with all columns in output")
+        return final_df
+
+
+def create_output_files(final_df, output_dir, timestamp, original_source_file):
+    """
+    Create the final output files
+    """
+    # Create a new Excel file with only the expanded data
+    output_excel_file = os.path.join(output_dir, f"resources_output_{timestamp}.xlsx")
+    
+    # Write only the expanded dataset to the Excel file
+    try:
+        # Use a more robust Excel writing approach with proper datetime formatting
+        with pd.ExcelWriter(output_excel_file, engine='openpyxl', datetime_format='YYYY-MM-DD') as writer:
+            final_df.to_excel(writer, sheet_name='DATA', index=False)
+        print(f"Successfully created Excel file: {output_excel_file}")
+    except Exception as excel_error:
+        print(f"Error writing Excel file: {str(excel_error)}")
+        # Fallback: try writing as CSV
+        csv_file = os.path.join(output_dir, f"resources_output_{timestamp}.csv")
+        final_df.to_csv(csv_file, index=False)
+        print(f"Saved as CSV instead: {csv_file}")
+    
+    # Create OUTPUT file in the source directory
+    source_dir = os.path.dirname(original_source_file)
+    output_file_in_source_dir = os.path.join(source_dir, "OUTPUT.xlsx")
+    
+    # Copy the clean output file to the source directory as OUTPUT.xlsx
+    shutil.copy2(output_excel_file, output_file_in_source_dir)
+    print(f"Created OUTPUT file in source directory: {output_file_in_source_dir}")
+
+
+def process_resource_data():
+    """
+    Main function that orchestrates the entire data processing pipeline
+    """
+    # Excel file name
+    excel_file = r"C:\Users\thockswender\OneDrive - InvestCloud\Tom\Resource Planning\resourcing.xlsm"
+    
+    # Create output directory
+    output_dir = "output"
+    
+    # Generate datetime stamp for all output files
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    print("=" * 60)
+    print("RESOURCE DATA PROCESSING PIPELINE")
+    print("=" * 60)
+    
+    # Step 1: Create database from Excel
+    print("\nSTEP 1: Creating database from Excel file...")
+    db_filename, copied_excel_file = create_database_from_excel(excel_file, output_dir, timestamp)
+    if not db_filename:
+        print("ERROR: Failed to create database. Exiting.")
+        return
+    
+    # Step 2: Create joined DataFrame
+    print("\nSTEP 2: Creating joined DataFrame...")
+    joined_df = create_joined_dataframe(db_filename)
+    if joined_df is None:
+        print("ERROR: Failed to create joined DataFrame. Exiting.")
+        return
+    
+    # Step 3: Expand DataFrame with daily records
+    print("\nSTEP 3: Expanding DataFrame with daily records...")
+    expanded_df = expand_dataframe_with_dates(joined_df)
+    
+    # Step 4: Add calculated fields
+    print("\nSTEP 4: Adding calculated fields...")
+    final_df = add_calculated_fields(expanded_df, db_filename)
+    
+    # Step 5: Apply field configuration
+    print("\nSTEP 5: Applying field configuration...")
+    final_df = apply_field_configuration(final_df, copied_excel_file, db_filename)
+    
+    # Step 6: Create output files
+    print("\nSTEP 6: Creating output files...")
+    create_output_files(final_df, output_dir, timestamp, excel_file)
+    
+    print(f"\nFinal data has {len(final_df)} rows")
+    print("=" * 60)
+    print("PROCESSING COMPLETED SUCCESSFULLY!")
+    print("=" * 60)
+
+
+
 
 def expand_with_missing_dates(df):
     """
-    Expand the DataFrame to create one record per month per unique combination of grouping dimensions.
-    Each unique combination of dimensions (Employee, Team, Squad, etc.) gets records only for its valid date range.
-    When an employee goes to 0% (leaves organization), stop creating ANY records for that employee.
+    Expand the DataFrame to create one record per day per unique combination of grouping dimensions.
+    For each employee, create daily records from their first AsOfDate to the dataset's max AsOfDate.
+    Use fill-down logic: use the most recent AsOfDate record's data for all subsequent days until the next AsOfDate.
     """
     try:
         # Ensure the DataFrame is sorted by Employee_Number and AsOfDate
@@ -305,101 +379,57 @@ def expand_with_missing_dates(df):
         max_date = df_sorted['AsOfDate'].max()
         
         print(f"Date range: {min_date.date()} to {max_date.date()}")
-        
-        # Create a complete month range for the entire dataset
-        all_months = pd.date_range(start=min_date.replace(day=1), 
-                                  end=max_date.replace(day=1), 
-                                  freq='MS')
-        
-        print(f"Creating records for {len(all_months)} months: {min_date.strftime('%Y-%m')} to {max_date.strftime('%Y-%m')}")
+        print(f"Total days: {(max_date - min_date).days + 1}")
         
         expanded_rows = []
         
-        # Get all columns except AsOfDate
-        dimension_columns = [col for col in df_sorted.columns if col != 'AsOfDate']
+        # Get all unique employees
+        unique_employees = df_sorted['Employee_Number'].unique()
+        print(f"Processing {len(unique_employees)} unique employees...")
         
-        # Create a unique key for each row by combining all dimension values
-        df_sorted['unique_key'] = df_sorted[dimension_columns].astype(str).agg('|'.join, axis=1)
-        
-        # Get unique combinations
-        unique_combinations = df_sorted[['unique_key'] + dimension_columns].drop_duplicates()
-        
-        print(f"Found {len(unique_combinations)} unique dimension combinations")
-        
-        # For each unique combination
-        for idx, combination in unique_combinations.iterrows():
-            if idx % 50 == 0:  # Progress indicator every 50 combinations
-                print(f"Processing combination {idx + 1}/{len(unique_combinations)}...")
+        # For each employee
+        for emp_idx, employee_num in enumerate(unique_employees):
+            if emp_idx % 50 == 0:  # Progress indicator every 50 employees
+                print(f"Processing employee {emp_idx + 1}/{len(unique_employees)}: {employee_num}")
             
-            # Find all records that match this combination, sorted by date
-            matching_records = df_sorted[df_sorted['unique_key'] == combination['unique_key']].copy().sort_values('AsOfDate')
+            # Get all records for this employee, sorted by AsOfDate
+            employee_records = df_sorted[df_sorted['Employee_Number'] == employee_num].copy().sort_values('AsOfDate')
             
-            if len(matching_records) == 0:
+            if len(employee_records) == 0:
                 continue
             
-            # Get the employee number for this combination
-            employee_num = combination['Employee_Number']
+            # Get the date range for this employee (from first AsOfDate to dataset max)
+            employee_start_date = employee_records['AsOfDate'].min()
+            employee_end_date = max_date
             
-            # Check if this employee has any 0% records (exit records)
-            employee_all_records = df_sorted[df_sorted['Employee_Number'] == employee_num].copy().sort_values('AsOfDate')
-            employee_exit_records = employee_all_records[employee_all_records['Percent'] == 0]
+            # Create daily date range for this employee
+            employee_dates = pd.date_range(start=employee_start_date, end=employee_end_date, freq='D')
             
-            # Find the earliest exit date for this employee
-            earliest_exit_date = None
-            if not employee_exit_records.empty:
-                earliest_exit_date = employee_exit_records['AsOfDate'].min()
-                print(f"Employee {employee_num} exits on {earliest_exit_date.date()}")
-            
-            # Find the last date for this specific combination
-            last_date_for_combination = matching_records['AsOfDate'].max()
-            
-            # Check if there are any newer records for this employee (indicating they moved to new teams)
-            employee_records_after_combination = employee_all_records[employee_all_records['AsOfDate'] > last_date_for_combination]
-            
-            # Determine the cutoff date for this combination
-            cutoff_date = None
-            if not employee_records_after_combination.empty:
-                # Employee has newer records, so this combination should stop after its last date
-                cutoff_date = last_date_for_combination
-            elif earliest_exit_date:
-                # Employee exited, use exit date
-                cutoff_date = earliest_exit_date
-            # If no newer records and no exit, continue until the end of the date range
-            
-            # For each month in the complete range
-            for month_start in all_months:
-                # If this employee has exited before this month, skip (but allow the exit month itself)
-                if earliest_exit_date and month_start > earliest_exit_date.replace(day=1):
-                    continue
+            # For each day in the employee's date range
+            for current_date in employee_dates:
+                # Find the most recent AsOfDate record for this employee on or before the current date
+                records_on_or_before = employee_records[employee_records['AsOfDate'] <= current_date]
                 
-                # If this combination has a cutoff date, stop creating records after that month
-                if cutoff_date and month_start > cutoff_date.replace(day=1):
-                    continue
-                
-                # Find the most recent record before or on the end of this month for this combination
-                month_end = month_start.replace(day=1) + pd.offsets.MonthEnd(0)
-                records_before_or_on = matching_records[matching_records['AsOfDate'] <= month_end]
-                
-                if not records_before_or_on.empty:
-                    # Get the most recent date's record
-                    most_recent_record = records_before_or_on.iloc[-1]
-                    most_recent_percent = most_recent_record['Percent']
+                if not records_on_or_before.empty:
+                    # Get the most recent record (fill-down logic)
+                    most_recent_record = records_on_or_before.iloc[-1]
                     
-                    # Create a record for this month (including exit records with Percent = 0)
+                    # Create a new record for this date with the most recent data
                     new_record = most_recent_record.copy()
-                    new_record['AsOfDate'] = month_start
-                    if 'unique_key' in new_record:
-                        del new_record['unique_key']
+                    new_record['AsOfDate'] = current_date
                     expanded_rows.append(new_record.to_dict())
         
         # Create the expanded DataFrame
         expanded_df = pd.DataFrame(expanded_rows)
         
+        # Ensure AsOfDate is datetime type
+        expanded_df['AsOfDate'] = pd.to_datetime(expanded_df['AsOfDate'])
+        
         # Sort by Employee_Number and AsOfDate
         expanded_df = expanded_df.sort_values(['Employee_Number', 'AsOfDate']).reset_index(drop=True)
         
-        print(f"Created {len(expanded_df)} monthly records (vs {len(df_sorted)} original records)")
-        print(f"Preserved all {len(unique_combinations)} unique dimension combinations")
+        print(f"Created {len(expanded_df)} daily records (vs {len(df_sorted)} original records)")
+        print(f"Expansion ratio: {len(expanded_df) / len(df_sorted):.1f}x")
         return expanded_df
         
     except Exception as e:
@@ -409,7 +439,7 @@ def expand_with_missing_dates(df):
 def add_calculated_columns(df, db_filename=None):
     """
     Add calculated columns based on AsOfDate and Percent values.
-    Now optimized for monthly records instead of daily.
+    Now optimized for daily records.
     """
     try:
         # Make a copy to avoid modifying the original DataFrame
@@ -425,6 +455,13 @@ def add_calculated_columns(df, db_filename=None):
         # Add YearMonth column in YYYY-MM format
         print("  - Adding YearMonth column (YYYY_MM format)...")
         df_copy['YearMonth'] = df_copy['AsOfDate'].dt.strftime('%Y_%m')
+        
+        # Add Allocation column (daily portion of monthly percentage)
+        print("  - Adding Allocation column (Percent / days_in_month for daily records)...")
+        # Calculate days in month for each date
+        df_copy['days_in_month'] = df_copy['AsOfDate'].dt.days_in_month
+        # Allocation = daily portion of the monthly percentage
+        df_copy['Allocation'] = df_copy['Percent'] / df_copy['days_in_month']
         
         # Add Employee_Name column (lastname, firstname format)
         print("  - Adding Employee_Name column (lastname, firstname format)...")
