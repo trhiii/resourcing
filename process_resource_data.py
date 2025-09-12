@@ -104,19 +104,21 @@ def create_joined_dataframe(db_filename):
         # Connect to the database
         conn = sqlite3.connect(db_filename)
         
-        # Create the joined query - left join from PersonToTeam to UKG, TeamToBacklog, and Rates
-        # Note: Role will be added programmatically after the join
+        # Create the joined query - left join from PersonToTeam to UKG, TeamToBacklog, Rates, and RoleOverride
+        # Note: Role will be added programmatically after the join with override logic
         join_query = """
         SELECT 
             pt.Employee_Number,
             ukg.*,
             pt.*,
             tb.*,
-            r.*
+            r.*,
+            ro.Role as Override_Role
         FROM "tblPersonToTeam" pt
         LEFT JOIN "tblUKG" ukg ON pt.Employee_Number = ukg.Employee_Number
         LEFT JOIN "tblTeamToBacklog" tb ON pt.Team = tb.Team
         LEFT JOIN "tblRates" r ON ukg.Location_Country = r.Location_Country
+        LEFT JOIN "tblRoleOverride" ro ON pt.Employee_Number = ro.Employee_Number
         ORDER BY pt.Employee_Number
         """
         
@@ -132,15 +134,24 @@ def create_joined_dataframe(db_filename):
         # Execute the query and get the results
         joined_df = pd.read_sql_query(join_query, conn)
         
-        # Add Role column programmatically using tblTitleMap lookup
-        print("Adding Role column programmatically...")
+        # Add Role column programmatically using tblTitleMap lookup with override logic
+        print("Adding Role column programmatically with override logic...")
         role_mapping_df = pd.read_sql_query('SELECT Business_Title, Role FROM "tblTitleMap"', conn)
         role_mapping = dict(zip(role_mapping_df['Business_Title'], role_mapping_df['Role']))
         
-        # Map Business_Title to Role, defaulting to "?" if not found
+        # First map Business_Title to Role, defaulting to "?" if not found
         joined_df['Role'] = joined_df['Business_Title'].map(role_mapping).fillna('?')
         
+        # Apply role overrides where available (non-null Override_Role)
+        override_mask = joined_df['Override_Role'].notna()
+        joined_df.loc[override_mask, 'Role'] = joined_df.loc[override_mask, 'Override_Role']
+        
+        # Drop the temporary Override_Role column
+        joined_df = joined_df.drop('Override_Role', axis=1)
+        
+        override_count = override_mask.sum()
         print(f"Role mapping applied: {len(role_mapping)} titles mapped, {joined_df['Role'].isna().sum()} records defaulted to '?'")
+        print(f"Role overrides applied: {override_count} records overridden from tblRoleOverride")
         
         conn.close()
         
@@ -364,12 +375,13 @@ def process_resource_data():
 def expand_with_missing_dates(df):
     """
     Expand the DataFrame to create one record per day per unique combination of grouping dimensions.
-    For each employee, create daily records from their first AsOfDate to the dataset's max AsOfDate.
-    Use fill-down logic: use the most recent AsOfDate record's data for all subsequent days until the next AsOfDate.
+    The repeating group dimension is Employee + Group + Subgroup + Team (excluding Percent and AsOfDate).
+    For each unique team assignment, track how the percentage changes over time and create daily records
+    with the appropriate percentage for each period.
     """
     try:
-        # Ensure the DataFrame is sorted by Employee_Number and AsOfDate
-        df_sorted = df.sort_values(['Employee_Number', 'AsOfDate']).reset_index(drop=True)
+        # Ensure the DataFrame is sorted by grouping dimensions and AsOfDate
+        df_sorted = df.sort_values(['Employee_Number', 'Group', 'Subgroup', 'Team', 'AsOfDate']).reset_index(drop=True)
         
         # Convert AsOfDate to datetime if it's not already
         df_sorted['AsOfDate'] = pd.to_datetime(df_sorted['AsOfDate'])
@@ -383,41 +395,63 @@ def expand_with_missing_dates(df):
         
         expanded_rows = []
         
-        # Get all unique employees
-        unique_employees = df_sorted['Employee_Number'].unique()
-        print(f"Processing {len(unique_employees)} unique employees...")
+        # Get all unique team assignments (Employee + Group + Subgroup + Team)
+        grouping_cols = ['Employee_Number', 'Group', 'Subgroup', 'Team']
+        unique_team_assignments = df_sorted[grouping_cols].drop_duplicates()
+        print(f"Processing {len(unique_team_assignments)} unique team assignments...")
         
-        # For each employee
-        for emp_idx, employee_num in enumerate(unique_employees):
-            if emp_idx % 50 == 0:  # Progress indicator every 50 employees
-                print(f"Processing employee {emp_idx + 1}/{len(unique_employees)}: {employee_num}")
+        # For each unique team assignment
+        for assignment_idx, (_, assignment_row) in enumerate(unique_team_assignments.iterrows()):
+            if assignment_idx % 50 == 0:  # Progress indicator every 50 assignments
+                emp_num = assignment_row['Employee_Number']
+                team = assignment_row['Team']
+                print(f"Processing assignment {assignment_idx + 1}/{len(unique_team_assignments)}: Employee {emp_num}, Team {team}")
             
-            # Get all records for this employee, sorted by AsOfDate
-            employee_records = df_sorted[df_sorted['Employee_Number'] == employee_num].copy().sort_values('AsOfDate')
+            # Create a mask for this specific team assignment
+            mask = True
+            for col in grouping_cols:
+                mask = mask & (df_sorted[col] == assignment_row[col])
             
-            if len(employee_records) == 0:
+            # Get all records for this team assignment, sorted by AsOfDate
+            team_assignment_records = df_sorted[mask].copy().sort_values('AsOfDate')
+            
+            if len(team_assignment_records) == 0:
                 continue
             
-            # Get the date range for this employee (from first AsOfDate to dataset max)
-            employee_start_date = employee_records['AsOfDate'].min()
-            employee_end_date = max_date
+            # Get the employee number for this assignment
+            employee_num = assignment_row['Employee_Number']
             
-            # Create daily date range for this employee
-            employee_dates = pd.date_range(start=employee_start_date, end=employee_end_date, freq='D')
+            # Get ALL AsOfDates for this employee across ALL team assignments
+            employee_all_dates = df_sorted[df_sorted['Employee_Number'] == employee_num]['AsOfDate'].unique()
+            employee_all_dates = sorted(employee_all_dates)
             
-            # For each day in the employee's date range
-            for current_date in employee_dates:
-                # Find the most recent AsOfDate record for this employee on or before the current date
-                records_on_or_before = employee_records[employee_records['AsOfDate'] <= current_date]
+            # Process each period for this team assignment
+            for period_idx, (_, period_record) in enumerate(team_assignment_records.iterrows()):
+                period_start_date = period_record['AsOfDate']
+                period_percent = period_record['Percent']
                 
-                if not records_on_or_before.empty:
-                    # Get the most recent record (fill-down logic)
-                    most_recent_record = records_on_or_before.iloc[-1]
+                # Find the end date for this period
+                period_start_idx = list(employee_all_dates).index(period_start_date)
+                if period_start_idx < len(employee_all_dates) - 1:
+                    # There's a next AsOfDate - this period ends the day before it
+                    next_asof_date = employee_all_dates[period_start_idx + 1]
+                    period_end_date = next_asof_date - pd.Timedelta(days=1)
+                else:
+                    # This is the last AsOfDate for this employee - continue to dataset max
+                    period_end_date = max_date
+                
+                # Only create daily records if the period has a valid date range and non-zero percentage
+                if period_start_date <= period_end_date and period_percent > 0:
+                    # Create daily date range for this period
+                    period_dates = pd.date_range(start=period_start_date, end=period_end_date, freq='D')
                     
-                    # Create a new record for this date with the most recent data
-                    new_record = most_recent_record.copy()
-                    new_record['AsOfDate'] = current_date
-                    expanded_rows.append(new_record.to_dict())
+                    # For each day in this period, create a record with the period's percentage
+                    for current_date in period_dates:
+                        # Create a new record for this date with the team assignment data
+                        new_record = period_record.copy()
+                        new_record['AsOfDate'] = current_date
+                        new_record['Percent'] = period_percent
+                        expanded_rows.append(new_record.to_dict())
         
         # Create the expanded DataFrame
         expanded_df = pd.DataFrame(expanded_rows)
@@ -425,8 +459,8 @@ def expand_with_missing_dates(df):
         # Ensure AsOfDate is datetime type
         expanded_df['AsOfDate'] = pd.to_datetime(expanded_df['AsOfDate'])
         
-        # Sort by Employee_Number and AsOfDate
-        expanded_df = expanded_df.sort_values(['Employee_Number', 'AsOfDate']).reset_index(drop=True)
+        # Sort by Employee_Number, Team, and AsOfDate
+        expanded_df = expanded_df.sort_values(['Employee_Number', 'Team', 'AsOfDate']).reset_index(drop=True)
         
         print(f"Created {len(expanded_df)} daily records (vs {len(df_sorted)} original records)")
         print(f"Expansion ratio: {len(expanded_df) / len(df_sorted):.1f}x")
