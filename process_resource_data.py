@@ -3,6 +3,79 @@ import sqlite3
 from datetime import datetime
 import os
 import shutil
+import platform
+
+def get_source_file_path():
+    """
+    Get the correct source file path based on the operating system.
+    Returns the path to the resourcing.xlsm file.
+    """
+    system = platform.system()
+    
+    if system == "Darwin":  # macOS
+        # macOS path provided by user
+        base_path = "/Users/tom/Library/CloudStorage/OneDrive-InvestCloud/Tom/Resource Planning"
+        excel_file = os.path.join(base_path, "resourcing.xlsm")
+    elif system == "Windows":
+        # Windows path (original)
+        base_path = r"C:\Users\thockswender\OneDrive - InvestCloud\Tom\Resource Planning"
+        excel_file = os.path.join(base_path, "resourcing.xlsm")
+    else:
+        # Fallback for other systems (Linux, etc.)
+        print(f"Warning: Unsupported operating system '{system}'. Using default path.")
+        base_path = "/Users/tom/Library/CloudStorage/OneDrive-InvestCloud/Tom/Resource Planning"
+        excel_file = os.path.join(base_path, "resourcing.xlsm")
+    
+    # Check if the base directory exists
+    if not os.path.exists(base_path):
+        print(f"Error: Base directory not found: {base_path}")
+        print(f"Please ensure the OneDrive directory is accessible on {system}")
+        return None
+    
+    # Check if the file exists
+    if not os.path.exists(excel_file):
+        print(f"Error: Source file not found at: {excel_file}")
+        print(f"Please ensure the file exists at the correct location for {system}")
+        print(f"Expected filename: resourcing.xlsm")
+        return None
+    
+    # Check if the file is readable
+    if not os.access(excel_file, os.R_OK):
+        print(f"Error: Source file is not readable: {excel_file}")
+        print(f"Please check file permissions on {system}")
+        return None
+    
+    print(f"Using source file: {excel_file}")
+    return excel_file
+
+def print_platform_help():
+    """
+    Print helpful information about file locations for different platforms.
+    """
+    system = platform.system()
+    print("\n" + "=" * 60)
+    print("PLATFORM-SPECIFIC FILE LOCATION HELP")
+    print("=" * 60)
+    
+    if system == "Darwin":  # macOS
+        print("macOS (Darwin) detected:")
+        print("Expected file location: /Users/tom/Library/CloudStorage/OneDrive-InvestCloud/Tom/Resource Planning/resourcing.xlsm")
+        print("If the file is not found:")
+        print("1. Check if OneDrive is synced and accessible")
+        print("2. Verify the file exists in the OneDrive folder")
+        print("3. Check file permissions (should be readable)")
+    elif system == "Windows":
+        print("Windows detected:")
+        print("Expected file location: C:\\Users\\thockswender\\OneDrive - InvestCloud\\Tom\\Resource Planning\\resourcing.xlsm")
+        print("If the file is not found:")
+        print("1. Check if OneDrive is synced and accessible")
+        print("2. Verify the file exists in the OneDrive folder")
+        print("3. Check file permissions (should be readable)")
+    else:
+        print(f"Unsupported platform: {system}")
+        print("Please ensure the file is accessible and update the path in get_source_file_path() function")
+    
+    print("=" * 60)
 
 def create_database_from_excel(excel_file, output_dir, timestamp):
     """
@@ -355,8 +428,12 @@ def process_resource_data():
     """
     Main function that orchestrates the entire data processing pipeline
     """
-    # Excel file name
-    excel_file = r"C:\Users\thockswender\OneDrive - InvestCloud\Tom\Resource Planning\resourcing.xlsm"
+    # Get the correct Excel file path based on the operating system
+    excel_file = get_source_file_path()
+    if not excel_file:
+        print("ERROR: Could not locate source file. Exiting.")
+        print_platform_help()
+        return
     
     # Create output directory
     output_dir = "output"
@@ -366,6 +443,7 @@ def process_resource_data():
     
     print("=" * 60)
     print("RESOURCE DATA PROCESSING PIPELINE")
+    print(f"Running on: {platform.system()} {platform.release()}")
     print("=" * 60)
     
     # Step 1: Create database from Excel
