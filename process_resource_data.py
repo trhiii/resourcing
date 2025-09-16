@@ -73,6 +73,40 @@ def create_database_from_excel(excel_file, output_dir, timestamp):
             except Exception as e:
                 print(f"  - Error processing worksheet '{worksheet_name}': {str(e)}")
         
+        # Append tblTBH data to tblUKG if both tables exist
+        try:
+            # Check if both tables exist
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('tblUKG', 'tblTBH');")
+            existing_tables = [row[0] for row in cursor.fetchall()]
+            
+            if 'tblUKG' in existing_tables and 'tblTBH' in existing_tables:
+                print("Appending tblTBH data to tblUKG...")
+                
+                # Get the current row count in tblUKG
+                cursor.execute("SELECT COUNT(*) FROM tblUKG")
+                ukg_before_count = cursor.fetchone()[0]
+                
+                # Get the row count in tblTBH
+                cursor.execute("SELECT COUNT(*) FROM tblTBH")
+                tbh_count = cursor.fetchone()[0]
+                
+                # Append tblTBH to tblUKG
+                cursor.execute("INSERT INTO tblUKG SELECT * FROM tblTBH")
+                conn.commit()
+                
+                # Get the new row count in tblUKG
+                cursor.execute("SELECT COUNT(*) FROM tblUKG")
+                ukg_after_count = cursor.fetchone()[0]
+                
+                print(f"  - Appended {tbh_count} rows from tblTBH to tblUKG")
+                print(f"  - tblUKG now has {ukg_after_count} rows (was {ukg_before_count})")
+            else:
+                print("Skipping tblTBH append - one or both tables missing")
+                
+        except Exception as e:
+            print(f"  - Error appending tblTBH to tblUKG: {str(e)}")
+        
         # Close the database connection
         conn.close()
         
@@ -277,7 +311,7 @@ def apply_field_configuration(final_df, excel_file, db_filename):
                 # Determine the maximum number of levels in the organization for dynamic mgr fields
                 max_levels = get_max_org_levels(db_filename)
                 mgr_fields = [f'mgr_{i}' for i in range(1, max_levels + 1)]
-                derived_fields = ['Year', 'YearMonth', 'Employee_Name', 'Allocation'] + mgr_fields + ['Level_From_Top']
+                derived_fields = ['Year', 'YearMonth', 'Sprint', 'Sprint_Allocation', 'Employee_Name', 'Allocation'] + mgr_fields + ['Level_From_Top']
                 final_columns = columns_to_keep + [col for col in derived_fields if col in final_df.columns]
                 final_df = final_df[final_columns]
                 print(f"Filtered final output to {len(final_columns)} columns: {final_columns}")
@@ -470,6 +504,41 @@ def expand_with_missing_dates(df):
         print(f"Error expanding DataFrame with missing dates: {str(e)}")
         return df
 
+def get_sprint_info(asof_date):
+    """
+    Calculate sprint information based on AsOfDate.
+    Sprint starts on Wednesday, January 1, 2025 and each sprint is 14 days.
+    Returns sprint text in format "Sprint NN" where NN is 01-26.
+    """
+    try:
+        # Convert to datetime if not already
+        if not isinstance(asof_date, pd.Timestamp):
+            asof_date = pd.to_datetime(asof_date)
+        
+        # Sprint start date: Wednesday, January 1, 2025
+        sprint_start = pd.Timestamp('2025-01-01')
+        
+        # Calculate days since sprint start
+        days_since_start = (asof_date - sprint_start).days
+        
+        # If before sprint start, return None or handle as needed
+        if days_since_start < 0:
+            return None
+        
+        # Calculate sprint number (1-based, each sprint is 14 days)
+        sprint_number = (days_since_start // 14) + 1
+        
+        # Cap at 26 sprints per year (26 * 14 = 364 days, leaving 1 day for year end)
+        sprint_number = min(sprint_number, 26)
+        
+        # Format as "Sprint NN"
+        return f"Sprint {sprint_number:02d}"
+        
+    except Exception as e:
+        print(f"Error calculating sprint for date {asof_date}: {str(e)}")
+        return None
+
+
 def add_calculated_columns(df, db_filename=None):
     """
     Add calculated columns based on AsOfDate and Percent values.
@@ -489,6 +558,14 @@ def add_calculated_columns(df, db_filename=None):
         # Add YearMonth column in YYYY-MM format
         print("  - Adding YearMonth column (YYYY_MM format)...")
         df_copy['YearMonth'] = df_copy['AsOfDate'].dt.strftime('%Y_%m')
+        
+        # Add Sprint column
+        print("  - Adding Sprint column (Sprint NN format)...")
+        df_copy['Sprint'] = df_copy['AsOfDate'].apply(get_sprint_info)
+        
+        # Add Sprint Allocation column (always 1/14)
+        print("  - Adding Sprint Allocation column (1/14)...")
+        df_copy['Sprint_Allocation'] = 1.0 / 14.0
         
         # Add Allocation column (daily portion of monthly percentage)
         print("  - Adding Allocation column (Percent / days_in_month for daily records)...")
@@ -524,9 +601,9 @@ def add_calculated_columns(df, db_filename=None):
             df_copy['Level_From_Top'] = df_copy['Employee_Number'].apply(
                 lambda x: get_employee_level_from_top(x, db_filename) if pd.notna(x) else None
             )
-            print(f"  - Successfully added {max_levels + 4} calculated columns to {len(df_copy)} rows")
+            print(f"  - Successfully added {max_levels + 6} calculated columns to {len(df_copy)} rows")
         else:
-            print(f"  - Successfully added 3 calculated columns to {len(df_copy)} rows")
+            print(f"  - Successfully added 5 calculated columns to {len(df_copy)} rows")
         
         return df_copy
         
