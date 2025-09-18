@@ -384,7 +384,7 @@ def apply_field_configuration(final_df, excel_file, db_filename):
                 # Determine the maximum number of levels in the organization for dynamic mgr fields
                 max_levels = get_max_org_levels(db_filename)
                 mgr_fields = [f'mgr_{i}' for i in range(1, max_levels + 1)]
-                derived_fields = ['Year', 'YearMonth', 'Sprint', 'Sprint_Allocation', 'Employee_Name', 'Allocation'] + mgr_fields + ['Level_From_Top']
+                derived_fields = ['Year', 'YearMonth', 'Sprint', 'Sprint_Allocation', 'RunDate', 'Employee_Name', 'Allocation'] + mgr_fields + ['Level_From_Top']
                 final_columns = columns_to_keep + [col for col in derived_fields if col in final_df.columns]
                 final_df = final_df[final_columns]
                 print(f"Filtered final output to {len(final_columns)} columns: {final_columns}")
@@ -586,7 +586,7 @@ def get_sprint_info(asof_date):
     """
     Calculate sprint information based on AsOfDate.
     Sprint starts on Wednesday, January 1, 2025 and each sprint is 14 days.
-    Returns sprint text in format "Sprint NN" where NN is 01-26.
+    Returns sprint text in format "Sprint ##, DD-MMM" where DD-MMM is the Tuesday end date.
     """
     try:
         # Convert to datetime if not already
@@ -609,8 +609,14 @@ def get_sprint_info(asof_date):
         # Cap at 26 sprints per year (26 * 14 = 364 days, leaving 1 day for year end)
         sprint_number = min(sprint_number, 26)
         
-        # Format as "Sprint NN"
-        return f"Sprint {sprint_number:02d}"
+        # Calculate the end date of this sprint (Tuesday, 13 days after sprint start)
+        sprint_end_date = sprint_start + pd.Timedelta(days=(sprint_number - 1) * 14 + 13)
+        
+        # Format the end date as DD-MMM
+        end_date_formatted = sprint_end_date.strftime('%d-%b')
+        
+        # Format as "Sprint ##, DD-MMM"
+        return f"Sprint {sprint_number:02d}, {end_date_formatted}"
         
     except Exception as e:
         print(f"Error calculating sprint for date {asof_date}: {str(e)}")
@@ -638,12 +644,16 @@ def add_calculated_columns(df, db_filename=None):
         df_copy['YearMonth'] = df_copy['AsOfDate'].dt.strftime('%Y_%m')
         
         # Add Sprint column
-        print("  - Adding Sprint column (Sprint NN format)...")
+        print("  - Adding Sprint column (Sprint ##, DD-MMM format)...")
         df_copy['Sprint'] = df_copy['AsOfDate'].apply(get_sprint_info)
         
         # Add Sprint Allocation column (always 1/14)
         print("  - Adding Sprint Allocation column (1/14)...")
         df_copy['Sprint_Allocation'] = 1.0 / 14.0
+        
+        # Add RunDate column (datetime when script is run)
+        print("  - Adding RunDate column (script execution datetime)...")
+        df_copy['RunDate'] = datetime.now()
         
         # Add Allocation column (daily portion of monthly percentage)
         print("  - Adding Allocation column (Percent / days_in_month for daily records)...")
@@ -679,9 +689,9 @@ def add_calculated_columns(df, db_filename=None):
             df_copy['Level_From_Top'] = df_copy['Employee_Number'].apply(
                 lambda x: get_employee_level_from_top(x, db_filename) if pd.notna(x) else None
             )
-            print(f"  - Successfully added {max_levels + 6} calculated columns to {len(df_copy)} rows")
+            print(f"  - Successfully added {max_levels + 7} calculated columns to {len(df_copy)} rows")
         else:
-            print(f"  - Successfully added 5 calculated columns to {len(df_copy)} rows")
+            print(f"  - Successfully added 6 calculated columns to {len(df_copy)} rows")
         
         return df_copy
         
