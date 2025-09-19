@@ -330,12 +330,14 @@ def apply_field_configuration(final_df, excel_file, db_filename):
     Returns the filtered DataFrame
     """
     try:
-        # Check if tblFieldConfig worksheet exists
-        field_config_df = pd.read_excel(excel_file, sheet_name='tblFieldConfig')
+        # Read the field configuration from SQLite database
+        conn = sqlite3.connect(db_filename)
+        field_config_df = pd.read_sql_query('SELECT * FROM "tblFieldConfig"', conn)
+        conn.close()
+        
         print("Applying field configuration to final output...")
         
-        # Read the field configuration to get the order
-        field_config_df = pd.read_excel(excel_file, sheet_name='tblFieldConfig')
+        # Clean column names (remove spaces, special characters)
         field_config_df.columns = [str(col).replace(' ', '_').replace('-', '_').replace('(', '').replace(')', '') for col in field_config_df.columns]
         
         # Find the table and field column names
