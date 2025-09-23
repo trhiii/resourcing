@@ -417,14 +417,6 @@ def create_output_files(final_df, output_dir, timestamp, original_source_file):
         final_df.to_csv(csv_file, index=False)
         print(f"Saved as CSV instead: {csv_file}")
     
-    # Create OUTPUT file in the source directory
-    source_dir = os.path.dirname(original_source_file)
-    output_file_in_source_dir = os.path.join(source_dir, "OUTPUT.xlsx")
-    
-    # Copy the clean output file to the source directory as OUTPUT.xlsx
-    shutil.copy2(output_excel_file, output_file_in_source_dir)
-    print(f"Created OUTPUT file in source directory: {output_file_in_source_dir}")
-    
     # Create OUTPUT file in the Resource Management directory
     resource_mgmt_dir = r"C:\Users\thockswender\InvestCloud\DW Tech Eng Mgmt - Documents\Resource Management"
     output_file_in_resource_mgmt = os.path.join(resource_mgmt_dir, "OUTPUT.xlsx")
