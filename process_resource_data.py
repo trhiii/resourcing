@@ -374,22 +374,22 @@ def apply_field_configuration(final_df, excel_file, db_filename):
                 if not found:
                     missing_fields.append(field_name)
             
-            # Fail if any fields are missing
+            # Warn about missing fields but don't fail
             if missing_fields:
-                error_msg = f"ERROR: Field configuration contains fields that don't exist:\n"
-                error_msg += "\n".join([f"  - {field}" for field in missing_fields])
-                error_msg += f"\n\nAvailable columns: {sorted(final_df.columns.tolist())}"
-                raise ValueError(error_msg)
+                print(f"WARNING: Field configuration contains fields that don't exist: {missing_fields}")
+                print("Proceeding with available fields only...")
             
             # Filter to only the specified columns in the specified order, plus derived fields
             if columns_to_keep:
                 # Determine the maximum number of levels in the organization for dynamic mgr fields
                 max_levels = get_max_org_levels(db_filename)
                 mgr_fields = [f'mgr_{i}' for i in range(1, max_levels + 1)]
-                derived_fields = ['Year', 'YearMonth', 'Sprint', 'Sprint_Allocation', 'RunDate', 'Employee_Name', 'Allocation'] + mgr_fields + ['Level_From_Top']
+                derived_fields = ['Year', 'YearMonth', 'Sprint', 'Sprint_Allocation', 'RunDate', 'Employee_Name', 'MonthlyAllocation', 'MonthlyCost', 'SprintCost'] + mgr_fields + ['Level_From_Top']
                 final_columns = columns_to_keep + [col for col in derived_fields if col in final_df.columns]
                 final_df = final_df[final_columns]
                 print(f"Filtered final output to {len(final_columns)} columns: {final_columns}")
+            else:
+                print("No valid fields found in configuration, including all columns")
         return final_df
     except Exception as e:
         print(f"No field configuration found or error reading it: {str(e)}")
@@ -424,6 +424,19 @@ def create_output_files(final_df, output_dir, timestamp, original_source_file):
     # Copy the clean output file to the source directory as OUTPUT.xlsx
     shutil.copy2(output_excel_file, output_file_in_source_dir)
     print(f"Created OUTPUT file in source directory: {output_file_in_source_dir}")
+    
+    # Create OUTPUT file in the Resource Management directory
+    resource_mgmt_dir = r"C:\Users\thockswender\InvestCloud\DW Tech Eng Mgmt - Documents\Resource Management"
+    output_file_in_resource_mgmt = os.path.join(resource_mgmt_dir, "OUTPUT.xlsx")
+    
+    # Ensure the Resource Management directory exists
+    if not os.path.exists(resource_mgmt_dir):
+        os.makedirs(resource_mgmt_dir)
+        print(f"Created Resource Management directory: {resource_mgmt_dir}")
+    
+    # Copy the clean output file to the Resource Management directory
+    shutil.copy2(output_excel_file, output_file_in_resource_mgmt)
+    print(f"Created OUTPUT file in Resource Management directory: {output_file_in_resource_mgmt}")
 
 
 def process_resource_data():
@@ -649,20 +662,36 @@ def add_calculated_columns(df, db_filename=None):
         print("  - Adding Sprint column (Sprint ##, DD-MMM format)...")
         df_copy['Sprint'] = df_copy['AsOfDate'].apply(get_sprint_info)
         
-        # Add Sprint Allocation column (always 1/14)
-        print("  - Adding Sprint Allocation column (1/14)...")
-        df_copy['Sprint_Allocation'] = 1.0 / 14.0
+        # Add Sprint Allocation column (Percent * 1/14)
+        print("  - Adding Sprint Allocation column (Percent * 1/14)...")
+        df_copy['Sprint_Allocation'] = df_copy['Percent'] / 14.0
         
         # Add RunDate column (datetime when script is run)
         print("  - Adding RunDate column (script execution datetime)...")
         df_copy['RunDate'] = datetime.now()
         
-        # Add Allocation column (daily portion of monthly percentage)
-        print("  - Adding Allocation column (Percent / days_in_month for daily records)...")
+        # Add MonthlyAllocation column (daily portion of monthly percentage)
+        print("  - Adding MonthlyAllocation column (Percent / days_in_month for daily records)...")
         # Calculate days in month for each date
         df_copy['days_in_month'] = df_copy['AsOfDate'].dt.days_in_month
-        # Allocation = daily portion of the monthly percentage
-        df_copy['Allocation'] = df_copy['Percent'] / df_copy['days_in_month']
+        # MonthlyAllocation = daily portion of the monthly percentage
+        df_copy['MonthlyAllocation'] = df_copy['Percent'] / df_copy['days_in_month']
+        
+        # Add MonthlyCost column (Percent * Blended_Rate / 365)
+        print("  - Adding MonthlyCost column (Percent * Blended_Rate / 365)...")
+        if 'Blended_Rate' in df_copy.columns:
+            df_copy['MonthlyCost'] = (df_copy['Percent'] * df_copy['Blended_Rate']) / 365
+        else:
+            print("    WARNING: Blended_Rate column not found, setting MonthlyCost to 0")
+            df_copy['MonthlyCost'] = 0
+        
+        # Add SprintCost column (Percent * Blended_Rate / 26)
+        print("  - Adding SprintCost column (Percent * Blended_Rate / 26)...")
+        if 'Blended_Rate' in df_copy.columns:
+            df_copy['SprintCost'] = (df_copy['Percent'] * df_copy['Blended_Rate']) / 26
+        else:
+            print("    WARNING: Blended_Rate column not found, setting SprintCost to 0")
+            df_copy['SprintCost'] = 0
         
         # Add Employee_Name column (lastname, firstname format)
         print("  - Adding Employee_Name column (lastname, firstname format)...")
@@ -691,9 +720,9 @@ def add_calculated_columns(df, db_filename=None):
             df_copy['Level_From_Top'] = df_copy['Employee_Number'].apply(
                 lambda x: get_employee_level_from_top(x, db_filename) if pd.notna(x) else None
             )
-            print(f"  - Successfully added {max_levels + 7} calculated columns to {len(df_copy)} rows")
+            print(f"  - Successfully added {max_levels + 9} calculated columns to {len(df_copy)} rows")
         else:
-            print(f"  - Successfully added 6 calculated columns to {len(df_copy)} rows")
+            print(f"  - Successfully added 8 calculated columns to {len(df_copy)} rows")
         
         return df_copy
         
