@@ -17,9 +17,9 @@ def get_source_file_path():
         base_path = "/Users/tom/Library/CloudStorage/OneDrive-InvestCloud/Tom/Resource Planning"
         excel_file = os.path.join(base_path, "resourcing.xlsm")
     elif system == "Windows":
-        # Windows path (original)
-        base_path = r"C:\Users\thockswender\OneDrive - InvestCloud\Tom\Resource Planning"
-        excel_file = os.path.join(base_path, "resourcing.xlsm")
+        # Windows path (updated)
+        base_path = r"C:\Users\thockswender\InvestCloud\DW Tech Eng Mgmt - Documents\Resource Management"
+        excel_file = os.path.join(base_path, "INPUT.xlsm")
     else:
         # Fallback for other systems (Linux, etc.)
         print(f"Warning: Unsupported operating system '{system}'. Using default path.")
@@ -66,7 +66,7 @@ def print_platform_help():
         print("3. Check file permissions (should be readable)")
     elif system == "Windows":
         print("Windows detected:")
-        print("Expected file location: C:\\Users\\thockswender\\OneDrive - InvestCloud\\Tom\\Resource Planning\\resourcing.xlsm")
+        print("Expected file location: C:\\Users\\thockswender\\InvestCloud\\DW Tech Eng Mgmt - Documents\\Resource Management\\INPUT.xlsm")
         print("If the file is not found:")
         print("1. Check if OneDrive is synced and accessible")
         print("2. Verify the file exists in the OneDrive folder")
